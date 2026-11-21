@@ -14,7 +14,10 @@ Model, per trophy, from the case's own history only:
     ln(1 + hours since release) axis with damped least-squares slopes, and the
     median rate is earners / players at the target.
   * That decomposition is blended with a damped logit-space trend of the rate
-    itself, so fast risers the decomposition under-reads still move.
+    itself, so fast risers the decomposition under-reads still move. The blend
+    weight follows the trophy's earners: the decomposition earns its full
+    weight only with a couple of hundred earners behind it; with a handful,
+    the median stays near the last rate, both fits being mostly noise there.
   * Story structure is enforced on the medians: Chapter 1 >= Chapter 2 >=
     Chapter 3 >= Chapter 4 >= final mission, 100% completion no higher than the
     rarest other trophy, platinum no higher than 100% completion.
@@ -264,9 +267,18 @@ def forecast_case(case: dict, name: str) -> dict:
                     (math.log1p(max(t, 0.0)), logit(float(r)), 1.0 + t / max(times[-1], 1.0))
                 )
             slope_l, resid = wls_slope(pts)
-            slope_l = min(max(slope_l * 0.55, -2.0), 2.5)
+            # Both fits are only as good as the earners behind them: with a
+            # handful of earners the earners-growth slope is counting noise,
+            # so the decomposition's blend weight ramps from a small floor
+            # to its full 0.55 only once earners reach a couple of hundred,
+            # and on the same ramp the trend slope is faded toward zero, so
+            # a scarce trophy's median stays close to its last rate instead
+            # of chasing either noisy fit.
+            trust = min(1.0, e_last / 200.0)
+            slope_l = min(max(slope_l * 0.55, -2.0), 2.5) * (0.25 + 0.75 * trust)
             trend_logit = logit(r_last) + slope_l * (x_tgt - x_last)
-            med_logit = 0.55 * logit(max(rate_decomp, 0.01)) + 0.45 * trend_logit
+            w_decomp = 0.10 + 0.45 * trust
+            med_logit = w_decomp * logit(max(rate_decomp, 0.01)) + (1.0 - w_decomp) * trend_logit
         else:
             resid = None
             med_logit = logit(max(rate_decomp, 0.01))
@@ -281,9 +293,12 @@ def forecast_case(case: dict, name: str) -> dict:
 
         if flat:
             # Stale page: the pending refresh grows the crowd faster than
-            # most earners, so shade down and widen honestly.
+            # most earners, so shade down and widen honestly. Widen with a
+            # floor, never a replacement: a trophy nobody has earned yet
+            # already carries a wider counting spread than 1.15, and a
+            # refresh can only add to its uncertainty, not take away.
             med_logit -= 1.1
-            sigma = 1.15
+            sigma = max(sigma, 1.15)
 
         medians[i] = inv_logit(med_logit)
         sigmas[i] = sigma
